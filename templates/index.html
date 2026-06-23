@@ -46,12 +46,24 @@
   #feed-wrap {
     position: relative;
     width: 100%;
-    background: #000;
+    background: #111;
     border-radius: 6px;
     overflow: hidden;
     margin-bottom: 16px;
+    min-height: 240px;         /* always visible even before cam starts */
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
-  #feed-wrap img { width: 100%; display: block; }
+
+  #feed {
+    width: 100%;
+    display: block;
+    transform: scaleX(-1);     /* mirror so it feels like a selfie cam */
+    background: #000;
+  }
+
+  #snap-canvas { display: none; }
 
   .badge {
     position: absolute;
@@ -62,6 +74,16 @@
     letter-spacing: 2px;
     padding: 3px 8px;
     border-radius: 3px;
+    z-index: 10;
+  }
+
+  #cam-status-msg {
+    position: absolute;
+    color: #f0d080;
+    font-size: 0.9rem;
+    text-align: center;
+    padding: 16px;
+    line-height: 1.6;
   }
 
   /* ── controls ── */
@@ -78,15 +100,15 @@
     letter-spacing: 1px;
     transition: opacity .15s;
   }
-  button:hover { opacity: .85; }
+  button:hover  { opacity: .85; }
   button:disabled { opacity: .4; cursor: not-allowed; }
 
-  #btn-capture { background: #cc2200; color: #fff; font-weight: bold; }
+  #btn-capture  { background: #cc2200; color: #fff; font-weight: bold; }
   #btn-template { background: #5a3a00; color: #f0d080; }
 
-  /* ── API row ── */
   .api-row {
-    display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap;
+    display: flex; gap: 8px; align-items: center;
+    margin-top: 12px; flex-wrap: wrap;
   }
   .api-row input {
     flex: 1; min-width: 180px;
@@ -99,7 +121,6 @@
   }
   #btn-groq { background: #1a4a1a; color: #90ee90; padding: 9px 18px; flex-shrink: 0; }
 
-  /* ── status ── */
   #status {
     margin-top: 14px;
     min-height: 24px;
@@ -132,12 +153,6 @@
     font-family: Georgia, serif;
   }
   #btn-download:hover { opacity: .85; }
-
-  .divider {
-    border: none;
-    border-top: 1px solid #8b5e1a;
-    margin: 18px 0;
-  }
 </style>
 </head>
 <body>
@@ -145,11 +160,12 @@
 <h1>⚠ WANTED ⚠</h1>
 <p class="subtitle">POSTER GENERATOR · DEAD OR ALIVE</p>
 
-<!-- Live feed card -->
 <div class="card">
   <div id="feed-wrap">
-    <img id="feed" src="/video_feed" alt="webcam">
-    <span class="badge">● LIVE</span>
+    <video id="feed" autoplay playsinline muted></video>
+    <canvas id="snap-canvas"></canvas>
+    <span class="badge" id="live-badge">● STARTING…</span>
+    <div id="cam-status-msg">Requesting camera access…</div>
   </div>
 
   <div class="controls">
@@ -157,7 +173,6 @@
     <button id="btn-template" onclick="captureTemplate()">🎲 CAPTURE + TEMPLATE</button>
   </div>
 
-  <!-- Groq API key row -->
   <div class="api-row">
     <input id="groq_key" type="password" placeholder="Groq API key  gsk_...  (optional for AI roast)">
     <button id="btn-groq" onclick="capture('groq_key')">⚡ Groq</button>
@@ -166,7 +181,6 @@
   <div id="status">Look at the camera and press CAPTURE</div>
 </div>
 
-<!-- Poster result card -->
 <div class="card" id="result">
   <h2>🤠 YOUR WANTED POSTER</h2>
   <img id="poster-img" src="" alt="wanted poster">
@@ -175,10 +189,83 @@
 </div>
 
 <script>
+  const video     = document.getElementById('feed');
+  const canvas    = document.getElementById('snap-canvas');
+  const badge     = document.getElementById('live-badge');
+  const camMsg    = document.getElementById('cam-status-msg');
+  let   camReady  = false;
+
+  // ── Start browser webcam ─────────────────────────────────────────────────
+  async function startCamera() {
+    // getUserMedia is only available on HTTPS or localhost
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showCamError('Camera API not available.\nMake sure the site is served over HTTPS.');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      });
+      video.srcObject = stream;
+
+      video.onloadedmetadata = () => {
+        video.play();
+        camMsg.style.display  = 'none';
+        badge.textContent     = '● LIVE';
+        badge.style.background = '#cc2200';
+        camReady = true;
+        setStatus('Look at the camera and press CAPTURE');
+      };
+
+    } catch (err) {
+      let hint = '';
+      if (err.name === 'NotAllowedError')
+        hint = 'Camera permission was denied.\nClick the camera icon in your browser address bar and allow access, then reload.';
+      else if (err.name === 'NotFoundError')
+        hint = 'No camera found on this device.';
+      else if (err.name === 'NotReadableError')
+        hint = 'Camera is in use by another app. Close other tabs/apps using the camera and reload.';
+      else
+        hint = err.name + ': ' + err.message;
+
+      showCamError(hint);
+    }
+  }
+
+  function showCamError(msg) {
+    camMsg.style.color   = '#ff6060';
+    camMsg.textContent   = '⚠ ' + msg;
+    badge.textContent    = '● NO CAMERA';
+    badge.style.background = '#555';
+    setStatus('Camera unavailable — see message above', 'err');
+  }
+
+  startCamera();
+
+  // ── Grab a JPEG snapshot ─────────────────────────────────────────────────
+  function snapshotBase64() {
+    // Video must be playing and have real dimensions
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+
+    if (!w || !h) return null;
+
+    canvas.width  = w;
+    canvas.height = h;
+
+    const ctx = canvas.getContext('2d');
+    // Un-mirror for the server (we mirrored via CSS only)
+    ctx.drawImage(video, 0, 0);
+    return canvas.toDataURL('image/jpeg', 0.92);
+  }
+
+  // ── UI helpers ───────────────────────────────────────────────────────────
   function setStatus(msg, type='') {
     const el = document.getElementById('status');
     el.textContent = msg;
-    el.className = type;
+    el.className   = type;
   }
 
   function disableButtons(yes) {
@@ -187,18 +274,30 @@
     });
   }
 
+  // ── Capture flow ─────────────────────────────────────────────────────────
   async function capture(keyInputId) {
+    if (!camReady) {
+      setStatus('❌ Camera not ready — allow camera access and reload', 'err');
+      return;
+    }
+
+    const imageData = snapshotBase64();
+    if (!imageData) {
+      setStatus('❌ Could not grab frame — camera may still be initialising, try again', 'err');
+      return;
+    }
+
     const apiKey = keyInputId ? document.getElementById(keyInputId).value.trim() : '';
     const useApi = apiKey.length > 0;
 
     disableButtons(true);
-    setStatus('Capturing face...', '');
+    setStatus('⏳ Processing…', '');
 
     try {
       const resp = await fetch('/capture', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ use_api: useApi, api_key: apiKey }),
+        body: JSON.stringify({ use_api: useApi, api_key: apiKey, image: imageData }),
       });
 
       const data = await resp.json();
@@ -210,6 +309,7 @@
       }
 
       showPoster(data);
+
     } catch(e) {
       setStatus('❌ Network error: ' + e.message, 'err');
       disableButtons(false);
@@ -222,16 +322,14 @@
   }
 
   function showPoster(data) {
-    const ts = Date.now();
-    const src = `/output/wanted_poster.jpg?t=${ts}`;
-
-    document.getElementById('poster-img').src = src;
+    const src = `/output/wanted_poster.jpg?t=${Date.now()}`;
+    document.getElementById('poster-img').src    = src;
     document.getElementById('btn-download').href = src;
     document.getElementById('result').style.display = 'block';
     document.getElementById('result').scrollIntoView({ behavior: 'smooth' });
 
-    const src_label = data.source === 'groq' ? '⚡ Groq AI' : '🎲 Template';
-    setStatus(`✅ Poster generated!  ${src_label}  •  Alias: ${data.alias}  •  Bounty: $${Number(data.bounty).toLocaleString()}`, 'ok');
+    const srcLabel = data.source === 'groq' ? '⚡ Groq AI' : '🎲 Template';
+    setStatus(`✅ Done!  ${srcLabel}  •  Alias: ${data.alias}  •  Bounty: $${Number(data.bounty).toLocaleString()}`, 'ok');
     disableButtons(false);
   }
 </script>
