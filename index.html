@@ -1,132 +1,337 @@
-import os
-import cv2
-import numpy as np
-import base64
-from flask import Flask, render_template, Response, jsonify, request, send_from_directory
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WANTED Poster Cam</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
 
-from roast import get_roast
-from poster import build_poster
+  body {
+    background: #1a0f00;
+    color: #f0d080;
+    font-family: Georgia, serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 16px;
+  }
 
-# CONFIG
+  h1 {
+    font-size: 3rem;
+    color: #cc2200;
+    text-shadow: 2px 2px 8px #000;
+    letter-spacing: 6px;
+    margin-bottom: 4px;
+  }
 
-OUTPUT_DIR      = "output"
-FACE_PHOTO_PATH = os.path.join(OUTPUT_DIR, "captured_face.jpg")
-POSTER_PATH     = os.path.join(OUTPUT_DIR, "wanted_poster.jpg")
+  .subtitle {
+    font-size: 0.95rem;
+    letter-spacing: 3px;
+    color: #c8a050;
+    margin-bottom: 28px;
+  }
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+  .card {
+    background: #2a1800;
+    border: 2px solid #8b5e1a;
+    border-radius: 8px;
+    padding: 24px;
+    width: 100%;
+    max-width: 700px;
+    margin-bottom: 20px;
+  }
 
-app = Flask(__name__)
+  /* ── webcam feed ── */
+  #feed-wrap {
+    position: relative;
+    width: 100%;
+    background: #111;
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 16px;
+    min-height: 240px;         /* always visible even before cam starts */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
 
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-)
+  #feed {
+    width: 100%;
+    display: block;
+    transform: scaleX(-1);     /* mirror so it feels like a selfie cam */
+    background: #000;
+  }
 
-# HELPERS
+  #snap-canvas { display: none; }
 
-def get_largest_face(faces):
-    if len(faces) == 0:
-        return None
-    return max(faces, key=lambda f: f[2] * f[3])
+  .badge {
+    position: absolute;
+    top: 10px; left: 10px;
+    background: #cc2200;
+    color: #fff;
+    font-size: 0.7rem;
+    letter-spacing: 2px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    z-index: 10;
+  }
 
+  #cam-status-msg {
+    position: absolute;
+    color: #f0d080;
+    font-size: 0.9rem;
+    text-align: center;
+    padding: 16px;
+    line-height: 1.6;
+  }
 
-def safe_crop(frame, x, y, w, h):
-    fh, fw = frame.shape[:2]
+  /* ── controls ── */
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; }
 
-    mx = int(w * 0.45)
-    my = int(h * 0.65)
+  button {
+    flex: 1;
+    padding: 12px;
+    border: none;
+    border-radius: 6px;
+    font-size: 1rem;
+    font-family: Georgia, serif;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: opacity .15s;
+  }
+  button:hover  { opacity: .85; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
 
-    x1 = max(0, x - mx)
-    y1 = max(0, y - my)
-    x2 = min(fw, x + w + mx)
-    y2 = min(fh, y + h + my)
+  #btn-capture  { background: #cc2200; color: #fff; font-weight: bold; }
+  #btn-template { background: #5a3a00; color: #f0d080; }
 
-    if x2 <= x1 or y2 <= y1:
-        x1, y1, x2, y2 = x, y, x + w, y + h
+  .api-row {
+    display: flex; gap: 8px; align-items: center;
+    margin-top: 12px; flex-wrap: wrap;
+  }
+  .api-row input {
+    flex: 1; min-width: 180px;
+    padding: 9px 12px;
+    background: #1a0f00;
+    border: 1px solid #8b5e1a;
+    border-radius: 6px;
+    color: #f0d080;
+    font-size: 0.9rem;
+  }
+  #btn-groq { background: #1a4a1a; color: #90ee90; padding: 9px 18px; flex-shrink: 0; }
 
-    x1 = max(0, min(x1, fw - 1))
-    x2 = max(x1 + 1, min(x2, fw))
-    y1 = max(0, min(y1, fh - 1))
-    y2 = max(y1 + 1, min(y2, fh))
+  #status {
+    margin-top: 14px;
+    min-height: 24px;
+    font-size: 0.9rem;
+    color: #c8a050;
+    text-align: center;
+    letter-spacing: 1px;
+  }
+  #status.ok  { color: #90ee90; }
+  #status.err { color: #ff6060; }
 
-    cropped = frame[y1:y2, x1:x2]
-    if cropped.size == 0:
-        return None
-    return cropped
+  /* ── poster result ── */
+  #result { display: none; text-align: center; }
+  #result h2 { color: #cc2200; letter-spacing: 4px; margin-bottom: 14px; }
+  #poster-img {
+    max-width: 100%;
+    border: 4px solid #8b5e1a;
+    border-radius: 6px;
+    box-shadow: 0 0 30px #cc220055;
+  }
+  #btn-download {
+    display: inline-block;
+    margin-top: 14px;
+    padding: 11px 28px;
+    background: #cc2200;
+    color: #fff;
+    border-radius: 6px;
+    text-decoration: none;
+    letter-spacing: 2px;
+    font-family: Georgia, serif;
+  }
+  #btn-download:hover { opacity: .85; }
+</style>
+</head>
+<body>
 
+<h1>⚠ WANTED ⚠</h1>
+<p class="subtitle">POSTER GENERATOR · DEAD OR ALIVE</p>
 
-def decode_image(data_url):
-    """Decode a base64 data URL (from browser canvas) into an OpenCV frame."""
-    # Strip the data:image/...;base64, prefix
-    if "," in data_url:
-        data_url = data_url.split(",", 1)[1]
-    img_bytes = base64.b64decode(data_url)
-    arr = np.frombuffer(img_bytes, np.uint8)
-    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    return frame
+<div class="card">
+  <div id="feed-wrap">
+    <video id="feed" autoplay playsinline muted></video>
+    <canvas id="snap-canvas"></canvas>
+    <span class="badge" id="live-badge">● STARTING…</span>
+    <div id="cam-status-msg">Requesting camera access…</div>
+  </div>
 
+  <div class="controls">
+    <button id="btn-capture"  onclick="capture('groq_key')">📸 CAPTURE + AI ROAST</button>
+    <button id="btn-template" onclick="captureTemplate()">🎲 CAPTURE + TEMPLATE</button>
+  </div>
 
-# ROUTES
+  <div class="api-row">
+    <input id="groq_key" type="password" placeholder="Groq API key  gsk_...  (optional for AI roast)">
+    <button id="btn-groq" onclick="capture('groq_key')">⚡ Groq</button>
+  </div>
 
-@app.route("/")
-def index():
-    return render_template("index.html")
+  <div id="status">Look at the camera and press CAPTURE</div>
+</div>
 
+<div class="card" id="result">
+  <h2>🤠 YOUR WANTED POSTER</h2>
+  <img id="poster-img" src="" alt="wanted poster">
+  <br>
+  <a id="btn-download" href="" download="wanted_poster.jpg">⬇ DOWNLOAD POSTER</a>
+</div>
 
-@app.route("/capture", methods=["POST"])
-def capture():
-    try:
-        data      = request.get_json()
-        use_api   = data.get("use_api", False)
-        api_key   = data.get("api_key", "")
-        image_b64 = data.get("image", "")
+<script>
+  const video     = document.getElementById('feed');
+  const canvas    = document.getElementById('snap-canvas');
+  const badge     = document.getElementById('live-badge');
+  const camMsg    = document.getElementById('cam-status-msg');
+  let   camReady  = false;
 
-        if not image_b64:
-            return jsonify({"error": "No image received from browser"}), 400
+  // ── Start browser webcam ─────────────────────────────────────────────────
+  async function startCamera() {
+    // getUserMedia is only available on HTTPS or localhost
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showCamError('Camera API not available.\nMake sure the site is served over HTTPS.');
+      return;
+    }
 
-        frame = decode_image(image_b64)
-        if frame is None:
-            return jsonify({"error": "Could not decode image from browser"}), 400
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      });
+      video.srcObject = stream;
 
-        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80)
-        )
+      video.onloadedmetadata = () => {
+        video.play();
+        camMsg.style.display  = 'none';
+        badge.textContent     = '● LIVE';
+        badge.style.background = '#cc2200';
+        camReady = true;
+        setStatus('Look at the camera and press CAPTURE');
+      };
 
-        face = get_largest_face(faces)
-        if face is None:
-            return jsonify({"error": "No face detected — move closer or improve lighting!"}), 400
+    } catch (err) {
+      let hint = '';
+      if (err.name === 'NotAllowedError')
+        hint = 'Camera permission was denied.\nClick the camera icon in your browser address bar and allow access, then reload.';
+      else if (err.name === 'NotFoundError')
+        hint = 'No camera found on this device.';
+      else if (err.name === 'NotReadableError')
+        hint = 'Camera is in use by another app. Close other tabs/apps using the camera and reload.';
+      else
+        hint = err.name + ': ' + err.message;
 
-        x, y, w, h = face
-        cropped = safe_crop(frame, x, y, w, h)
+      showCamError(hint);
+    }
+  }
 
-        if cropped is None:
-            return jsonify({"error": "Face crop failed — try moving slightly and capturing again"}), 400
+  function showCamError(msg) {
+    camMsg.style.color   = '#ff6060';
+    camMsg.textContent   = '⚠ ' + msg;
+    badge.textContent    = '● NO CAMERA';
+    badge.style.background = '#555';
+    setStatus('Camera unavailable — see message above', 'err');
+  }
 
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        cv2.imwrite(FACE_PHOTO_PATH, cropped)
+  startCamera();
 
-        roast = get_roast(use_api=use_api, api_key=api_key if use_api else None)
-        build_poster(FACE_PHOTO_PATH, roast, POSTER_PATH)
+  // ── Grab a JPEG snapshot ─────────────────────────────────────────────────
+  function snapshotBase64() {
+    // Video must be playing and have real dimensions
+    const w = video.videoWidth;
+    const h = video.videoHeight;
 
-        return jsonify(roast)
+    if (!w || !h) return null;
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+    canvas.width  = w;
+    canvas.height = h;
 
+    const ctx = canvas.getContext('2d');
+    // Un-mirror for the server (we mirrored via CSS only)
+    ctx.drawImage(video, 0, 0);
+    return canvas.toDataURL('image/jpeg', 0.92);
+  }
 
-@app.route("/output/<path:filename>")
-def output_file(filename):
-    return send_from_directory(OUTPUT_DIR, filename)
+  // ── UI helpers ───────────────────────────────────────────────────────────
+  function setStatus(msg, type='') {
+    const el = document.getElementById('status');
+    el.textContent = msg;
+    el.className   = type;
+  }
 
+  function disableButtons(yes) {
+    ['btn-capture','btn-template','btn-groq'].forEach(id => {
+      document.getElementById(id).disabled = yes;
+    });
+  }
 
-# RUN
+  // ── Capture flow ─────────────────────────────────────────────────────────
+  async function capture(keyInputId) {
+    if (!camReady) {
+      setStatus('❌ Camera not ready — allow camera access and reload', 'err');
+      return;
+    }
 
-if __name__ == "__main__":
-    print("=" * 50)
-    print("  WANTED POSTER CAM  —  Flask GUI")
-    print("  Open browser:  http://127.0.0.1:5000")
-    print("  Ctrl+C to stop")
-    print("=" * 50)
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    const imageData = snapshotBase64();
+    if (!imageData) {
+      setStatus('❌ Could not grab frame — camera may still be initialising, try again', 'err');
+      return;
+    }
+
+    const apiKey = keyInputId ? document.getElementById(keyInputId).value.trim() : '';
+    const useApi = apiKey.length > 0;
+
+    disableButtons(true);
+    setStatus('⏳ Processing…', '');
+
+    try {
+      const resp = await fetch('/capture', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ use_api: useApi, api_key: apiKey, image: imageData }),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok || data.error) {
+        setStatus('❌ ' + (data.error || 'Something went wrong'), 'err');
+        disableButtons(false);
+        return;
+      }
+
+      showPoster(data);
+
+    } catch(e) {
+      setStatus('❌ Network error: ' + e.message, 'err');
+      disableButtons(false);
+    }
+  }
+
+  function captureTemplate() {
+    document.getElementById('groq_key').value = '';
+    capture(null);
+  }
+
+  function showPoster(data) {
+    const src = `/output/wanted_poster.jpg?t=${Date.now()}`;
+    document.getElementById('poster-img').src    = src;
+    document.getElementById('btn-download').href = src;
+    document.getElementById('result').style.display = 'block';
+    document.getElementById('result').scrollIntoView({ behavior: 'smooth' });
+
+    const srcLabel = data.source === 'groq' ? '⚡ Groq AI' : '🎲 Template';
+    setStatus(`✅ Done!  ${srcLabel}  •  Alias: ${data.alias}  •  Bounty: $${Number(data.bounty).toLocaleString()}`, 'ok');
+    disableButtons(false);
+  }
+</script>
+</body>
+</html>
