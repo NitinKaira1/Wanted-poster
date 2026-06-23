@@ -19,6 +19,8 @@ def load_font(size):
         "C:/Windows/Fonts/times.ttf",
         "C:/Windows/Fonts/Arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSerif.ttf",
     ]
     for path in candidates:
         try:
@@ -29,15 +31,9 @@ def load_font(size):
 
 
 def add_aged_texture(img):
-    """
-    Aged effect using:
-    1. Random speckle dots (no loops drawing rectangles = no visible lines)
-    2. A smooth radial vignette made with Gaussian blur (looks natural)
-    """
     w, h = img.size
     draw = ImageDraw.Draw(img)
 
-    # Speckle dots 
     for _ in range(1500):
         x = random.randint(0, w - 1)
         y = random.randint(0, h - 1)
@@ -47,42 +43,79 @@ def add_aged_texture(img):
         b = max(0, COLOR_BG[2] - darkness)
         draw.point((x, y), fill=(r, g, b))
 
-
-    vignette = Image.new("L", (w, h), 0)          # black canvas, grayscale
+    vignette = Image.new("L", (w, h), 0)
     vd = ImageDraw.Draw(vignette)
     pad = int(min(w, h) * 0.15)
-    vd.ellipse([pad, pad, w - pad, h - pad], fill=255)  # white oval in center
-    vignette = vignette.filter(ImageFilter.GaussianBlur(radius=min(w,h) // 4))
+    vd.ellipse([pad, pad, w - pad, h - pad], fill=255)
+    vignette = vignette.filter(ImageFilter.GaussianBlur(radius=min(w, h) // 4))
 
-    # Convert vignette to 0.0-1.0 range and darken corners
     import numpy as np
     arr   = np.array(img).astype(float)
-    vmask = np.array(vignette).astype(float) / 255.0  # 1 = bright center, 0 = dark edge
-
-    # Darken edges: pixels where vmask is low get multiplied by a smaller number
-    strength = 0.45   # 0 = full black edges, 1 = no effect
+    vmask = np.array(vignette).astype(float) / 255.0
+    strength = 0.45
     factor   = strength + (1 - strength) * vmask
-    arr      = arr * factor[:, :, None]              # apply to R,G,B channels
+    arr      = arr * factor[:, :, None]
     arr      = arr.clip(0, 255).astype("uint8")
 
     return Image.fromarray(arr)
 
 
-def draw_centered_text(draw, y, text, font, color, poster_w, max_width=None, spacing=8):
+def wrap_text_to_width(draw, text, font, max_width):
+    """
+    Wrap text so that each rendered line fits within max_width pixels.
+    Much more accurate than estimating via char count.
+    """
+    words = text.split()
+    lines = []
+    current = ""
+
+    for word in words:
+        test = (current + " " + word).strip()
+        w = draw.textlength(test, font=font)
+        if w <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+
+    return lines if lines else [text]
+
+
+def fit_font_to_width(text, max_width, max_size, min_size=14):
+    """
+    Shrink font size until the text fits within max_width pixels.
+    Used for single-line elements like the alias.
+    """
+    size = max_size
+    while size >= min_size:
+        font = load_font(size)
+        # Create a temporary image just to measure
+        tmp = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        if tmp.textlength(text, font=font) <= max_width:
+            return font, size
+        size -= 2
+    return load_font(min_size), min_size
+
+
+def draw_centered_text(draw, y, text, font, color, poster_w,
+                       max_width=None, spacing=8):
+    """Draw text centered horizontally, wrapping to max_width if given."""
     if max_width:
-        avg_char_w = max(1, font.getlength("A"))
-        chars_per_line = max(1, int(max_width / avg_char_w))
-        lines = textwrap.wrap(text, width=chars_per_line)
+        lines = wrap_text_to_width(draw, text, font, max_width)
     else:
         lines = [text]
 
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
         tw = bbox[2] - bbox[0]
-        # If text wider than poster, shrink font isn't easy here,
-        # so just let it wrap — the max_width handles that
-        draw.text(((poster_w - tw) // 2, y), line, font=font, fill=color)
-        y += (bbox[3] - bbox[1]) + spacing
+        th = bbox[3] - bbox[1]
+        x  = (poster_w - tw) // 2
+        draw.text((x, y), line, font=font, fill=color)
+        y += th + spacing
 
     return y
 
@@ -92,7 +125,7 @@ def build_poster(face_image_path: str, roast: dict, output_path: str = None):
     if output_path is None:
         output_path = os.path.join(OUTPUT_DIR, "wanted_poster.jpg")
 
-    #Background gradient 
+    # Background gradient
     poster = Image.new("RGB", (POSTER_W, POSTER_H), COLOR_BG)
     draw   = ImageDraw.Draw(poster)
 
@@ -104,21 +137,20 @@ def build_poster(face_image_path: str, roast: dict, output_path: str = None):
                         max(0, COLOR_BG[1] - shade),
                         max(0, COLOR_BG[2] - shade)))
 
-    # Borders 
+    # Borders
     draw.rectangle([8, 8, POSTER_W - 9, POSTER_H - 9],
                    outline=COLOR_BORDER_OUT, width=6)
     draw.rectangle([18, 18, POSTER_W - 19, POSTER_H - 19],
                    outline=COLOR_BORDER_IN, width=2)
 
-    #  Fonts 
+    # Fonts
     font_wanted = load_font(90)
     font_dead   = load_font(36)
-    font_name   = load_font(38)   # slightly smaller so alias fits
     font_crime  = load_font(20)
     font_bounty = load_font(52)
     font_small  = load_font(17)
 
-    # WANTED 
+    # WANTED header
     y = 28
     y = draw_centered_text(draw, y, "WANTED", font_wanted, COLOR_RED, POSTER_W)
     y = draw_centered_text(draw, y - 8, "DEAD OR ALIVE", font_dead, COLOR_DARK, POSTER_W)
@@ -126,7 +158,7 @@ def build_poster(face_image_path: str, roast: dict, output_path: str = None):
     draw.line([(40, y), (POSTER_W - 40, y)], fill=COLOR_DARK, width=2)
     y += 14
 
-    # Face photo 
+    # Face photo
     face_img = Image.open(face_image_path).convert("RGB")
     face_img.thumbnail((260, 290))
 
@@ -141,33 +173,43 @@ def build_poster(face_image_path: str, roast: dict, output_path: str = None):
     poster.paste(framed, (face_x, y))
     y += framed.height + 16
 
-    #  Alias 
+    # Alias — auto-shrink font so it always fits on one or two lines
     draw.line([(40, y), (POSTER_W - 40, y)], fill=COLOR_DARK, width=2)
-    y += 10
+    y += 12
 
-    alias = roast.get("alias", "UNKNOWN SUSPECT").upper()
+    alias      = roast.get("alias", "UNKNOWN SUSPECT").upper()
     alias_text = f'A.K.A  "{alias}"'
-    # Wrap alias so it never gets cut off at poster edge
-    y = draw_centered_text(draw, y, alias_text, font_name, COLOR_DARK, POSTER_W,
-                           max_width=POSTER_W - 60)
-    y += 4
+    max_text_w = POSTER_W - 60  # 30px margin each side
 
-    #  Crime 
+    # Try to fit on one line first (shrink from 38 down)
+    alias_font, alias_size = fit_font_to_width(alias_text, max_text_w, max_size=38)
+
+    # If even at min size it's too long, wrap at size 28
+    if alias_size <= 14:
+        alias_font = load_font(28)
+
+    y = draw_centered_text(draw, y, alias_text, alias_font, COLOR_DARK, POSTER_W,
+                           max_width=max_text_w, spacing=6)
+    y += 6
+
+    # Crime
     y = draw_centered_text(draw, y, "CRIME:", font_crime, COLOR_RED, POSTER_W)
-    y = draw_centered_text(draw, y, roast.get("crime", "Being suspiciously ordinary"),
-                           font_crime, COLOR_DARK, POSTER_W, max_width=POSTER_W - 80)
+    y = draw_centered_text(draw, y,
+                           roast.get("crime", "Being suspiciously ordinary"),
+                           font_crime, COLOR_DARK, POSTER_W,
+                           max_width=max_text_w, spacing=6)
     y += 8
 
-    #  Description 
+    # Description
     draw.line([(40, y), (POSTER_W - 40, y)], fill=COLOR_DARK, width=1)
     y += 8
     y = draw_centered_text(draw, y,
                            roast.get("description", "Dangerous. Approach with snacks."),
                            font_small, COLOR_DARK, POSTER_W,
-                           max_width=POSTER_W - 80, spacing=6)
+                           max_width=max_text_w, spacing=5)
     y += 8
 
-    #  Bounty 
+    # Bounty
     draw.line([(40, y), (POSTER_W - 40, y)], fill=COLOR_DARK, width=2)
     y += 12
     y = draw_centered_text(draw, y, "REWARD", font_dead, COLOR_DARK, POSTER_W)
@@ -176,14 +218,14 @@ def build_poster(face_image_path: str, roast: dict, output_path: str = None):
     y = draw_centered_text(draw, y, "FOR CAPTURE  •  DEAD OR ALIVE",
                            font_small, COLOR_DARK, POSTER_W)
 
-    #  Footer 
+    # Footer
     footer_y = POSTER_H - 48
     draw.line([(40, footer_y), (POSTER_W - 40, footer_y)], fill=COLOR_DARK, width=2)
     draw_centered_text(draw, footer_y + 8,
                        "REPORT TO YOUR LOCAL SHERIFF  •  NO QUESTIONS ASKED",
                        font_small, COLOR_DARK, POSTER_W)
 
-    #  Smooth aged texture (no lines!) 
+    # Aged texture
     poster = add_aged_texture(poster)
 
     poster.save(output_path, quality=95)
